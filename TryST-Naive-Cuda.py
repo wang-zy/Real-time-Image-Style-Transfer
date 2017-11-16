@@ -99,7 +99,7 @@ loss_fn = nn.MSELoss()
 
 optimizer = torch.optim.LBFGS([target])
 nStep = 0
-while nStep < 500:
+while nStep < 700:
     def closure():
         global nStep
         target.data.clamp_(0, 1)
