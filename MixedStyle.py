@@ -35,15 +35,25 @@ def LoadImage(fname):
     return data
 
 
-def SaveImage(tensor_orig, tensor_transformed, filename):
+def SaveImage(content, style, transformed, filename):
     def RGB(image):
         return (image.transpose(0, 2, 3, 1)).clip(0, 255).astype(np.uint8)
-    result = Image.fromarray(RGB(tensor_transformed.data.cpu().numpy())[0])
-    orig = Image.fromarray(RGB(tensor_orig.data.cpu().numpy())[0])
-    new_im = Image.new('RGB', (result.size[0] * 2 + 5, result.size[1]))
-    new_im.paste(orig, (0, 0))
-    new_im.paste(result, (result.size[0] + 5, 0))
+    c = Image.fromarray(RGB(content.data.cpu().numpy())[0])
+    s = Image.fromarray(RGB(style.data.cpu().numpy())[0])
+    result = Image.fromarray(RGB(transformed.data.cpu().numpy())[0])
+    new_im = Image.new('RGB', (result.size[0] * 3 + 10, result.size[1]))
+    new_im.paste(c, (0, 0))
+    new_im.paste(s, (result.size[0] + 5, 0))
+    new_im.paste(result, (result.size[0]*2 + 10, 0))
     new_im.save(filename)
+
+
+def Stack(content, style):
+    nBatch = content.size()[0]
+    mix = []
+    for i in range(nBatch):
+        mix.append(torch.cat([content[i, :, :, :], style.squeeze()]))
+    return Variable(torch.stack(mix).data,  requires_grad=False)
 
 
 def Gram(Fmap):
@@ -80,22 +90,18 @@ class LossNet(nn.Module):
         return output
 
 
-def TotalLoss(pred, content):
-    global Style_Gram
+def TotalLoss(pred, content, Style_Gram, styleWeight):
     global vgg
     global loss_fn
-    global contentWeight
-    global styleWeight
-    global tvWeight
 
     # Total variation regularization
-    tvLoss = tvWeight * (torch.sum(torch.abs(pred[:, :, 1:, :] - pred[:, :, :-1, :])) +
-                         torch.sum(torch.abs(pred[:, :, :, 1:] - pred[:, :, :, :-1])))
+    tvLoss = 1e-7 * (torch.sum(torch.abs(pred[:, :, 1:, :] - pred[:, :, :-1, :])) +
+                     torch.sum(torch.abs(pred[:, :, :, 1:] - pred[:, :, :, :-1])))
 
     # content loss
     feature_pred = vgg(pred)
     feature_content = vgg(content)
-    contentLoss = contentWeight * loss_fn(feature_pred[8], Variable(feature_content[8].data, requires_grad=False))
+    contentLoss = loss_fn(feature_pred[8], Variable(feature_content[8].data, requires_grad=False))
 
     # style loss
     styleLoss = 0.
@@ -159,7 +165,7 @@ class StyleNet(nn.Module):
         super(StyleNet, self).__init__()
         bn_flag = True
         self.relu = nn.ReLU()
-        self.conv1 = Conv(3, 32, 9, stride=1)
+        self.conv1 = Conv(6, 32, 9, stride=1)
         self.in1 = nn.InstanceNorm2d(32, affine=bn_flag)
         self.conv2 = Conv(32, 64, 3, stride=2)
         self.in2 = nn.InstanceNorm2d(64, affine=bn_flag)
@@ -198,13 +204,16 @@ vgg.cuda()
 
 transform = transforms.Compose([transforms.ToTensor(), transforms.Lambda(lambda x: x.mul(255))])
 
-dataset = COCODataset('Dataset/PreData/*.jpg', transform)
+dataset = COCODataset('Dataset/CropData/*.jpg', transform)
 loader = torch.utils.data.DataLoader(dataset, batch_size=batchSize, shuffle=True, num_workers=4)
 
 
-# load content image and style image
-style_data = LoadImage('candy.jpg').type(dtype)
-Style_Gram = StyleGram(normalize(style_data))
+# load style image and get style gram
+style_name = ['van.jpg', 'mosaic.jpg', 'candy.jpg']
+nStyle = len(style_name)
+style_data = [LoadImage('StyleImages/'+fname).type(dtype) for fname in style_name]
+style_gram = [StyleGram(normalize(s)) for s in style_data]
+style_weight = [1e5, 8e4, 8e3]
 
 stylenet = StyleNet()
 stylenet.cuda()
@@ -212,32 +221,31 @@ stylenet.cuda()
 loss_fn = nn.MSELoss().cuda()
 optimizer = torch.optim.Adam(stylenet.parameters(), lr=1e-3)
 
-contentWeight = 1.0
-styleWeight = 8e3
-tvWeight = 1e-7
-
 counter = 0
 loss_list = []
 
-for j in range(2):
+for j in range(4):
     for i, content_data in enumerate(loader):
+        ns = i % nStyle
         content_data = Variable(content_data.cuda(), requires_grad=False)
-        y_pred = stylenet(content_data)
-        loss, CL, SL, TVL = TotalLoss(normalize(y_pred), normalize(Variable(content_data.data.clone(), volatile=True)))
+        input = Stack(content_data, style_data[ns])
+        y_pred = stylenet(input)
+        loss, CL, SL, TVL = TotalLoss(normalize(y_pred), normalize(Variable(content_data.data.clone(), volatile=True)),
+                                      style_gram[ns], style_weight[ns])
         loss_list.append([loss.data[0], CL.data[0], SL.data[0], TVL.data[0]])
         if counter % 500 == 0:
-            fname = 'models/epoch_'+str(j)+'_iter_'+str(i)+'_'+'{:.3f}'.format(loss.data[0]) + \
+            fname = 'mix_model/epoch_'+str(j)+'_iter_'+str(i)+'_'+'{:.3f}'.format(loss.data[0]) + \
                     '_'+'{:.3f}'.format(CL.data[0])+'_'+'{:.3f}'.format(SL.data[0])
             torch.save(stylenet, fname+'.model')
-            SaveImage(content_data[0,:,:,:].unsqueeze(0), stylenet(content_data[0,:,:,:].unsqueeze(0)), fname+'.png')
+            SaveImage(content_data[0,:,:,:].unsqueeze(0), style_data[ns], stylenet(input[0,:,:,:].unsqueeze(0)), fname+'.png')
         if counter % 50 == 0:
             print(i, 'Total:', loss.data[0], 'Content:', CL.data[0], 'Style:', SL.data[0], 'TV:', TVL.data[0])
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         counter += 1
-    np.save('Loss', np.asarray(loss_list))
+    np.save('MixLoss', np.asarray(loss_list))
 
-# candy 8e3 - model2
-# van 1e5 models 3/4
-# mosaic 8e4 - model
+
+
+
