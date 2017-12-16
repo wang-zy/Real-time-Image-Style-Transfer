@@ -1,5 +1,7 @@
 # Real-time-Image-Style-Transfer
 
-Neural-Style.py is the implementation for the neural algorithm.
+Implementation of two style transfer algorithms in PyTorch.
 
-Realtime-ST-Cuda.py is the implementation for the real-time style transfer.
+Neural algorithm (Gatys *et al*, 2015): Neural-Style.py 
+
+Real-time style transfer (Johnson *et al*, 2016) Realtime-ST-Cuda.py
